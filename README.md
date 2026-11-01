@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # CloudSentinel AI — Network Traffic Analytics Mini Project
 
 A beginner-friendly college prototype combining **Data Mining, Data Visualization, and Cloud Computing/DevOps**.
@@ -113,3 +114,7 @@ CloudSentinel-AI/
 - Record actual evaluation metrics; never invent results.
 - Explain false positives, false negatives, dataset limitations, and why a suspicious prediction is not proof of an attack.
 - Add your names, UIDs, university, screenshots, and report only after the application runs successfully.
+=======
+# CloudSentinel-AI
+AI-powered Network Intrusion Detection and Traffic Classification System
+>>>>>>> c78dcb9338ad54ce3d0173dba91bfa60b609b9b7
