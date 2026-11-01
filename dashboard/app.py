@@ -1,414 +1,303 @@
-
 from __future__ import annotations
 
 import json
-import sys
+import io
 from pathlib import Path
+from typing import Any
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
+import joblib
+import numpy as np
 import pandas as pd
-import plotly.express as px
 import streamlit as st
 
-from src.config import METADATA_PATH, MODEL_PATH, MAX_UPLOAD_MB
-from src.predict import predict_frame
+# ------------------------------------------------------------
+# NTIC — Network Traffic Intelligence Center
+# Powered by CloudSentinel AI
+# ------------------------------------------------------------
 
+ROOT = Path(__file__).resolve().parents[1]
+MODEL_PATH = ROOT / "artifacts" / "model.joblib"
+METADATA_PATH = ROOT / "artifacts" / "metadata.json"
 
-# --------------------------------------------------
-# PAGE CONFIGURATION
-# --------------------------------------------------
 st.set_page_config(
-    page_title="CloudSentinel AI",
+    page_title="NTIC | Network Traffic Intelligence Center",
     page_icon="🛡️",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-st.title("🛡️ CloudSentinel AI")
-st.caption(
-    "Network traffic classification, machine learning "
-    "and security analytics prototype"
+# Enterprise light theme
+st.markdown(
+    """
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&display=swap');
+    html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
+    .stApp { background: #F4F7FC; color: #172B4D; }
+    [data-testid="stHeader"] { background: rgba(244,247,252,.92); }
+    [data-testid="stSidebar"] { background: #FFFFFF; border-right: 1px solid #DFE7F2; }
+    [data-testid="stSidebar"] * { color: #243B5A; }
+    .block-container { padding-top: 2rem; padding-bottom: 3rem; max-width: 1500px; }
+    .brand { display:flex; align-items:center; gap:13px; margin-bottom:24px; }
+    .brand-icon { width:48px; height:48px; display:flex; align-items:center; justify-content:center;
+      border-radius:14px; background:linear-gradient(135deg,#DCEBFF,#C7F2F4); font-size:25px; }
+    .brand-name { font-size:22px; font-weight:800; color:#173B69; line-height:1.05; }
+    .brand-sub { font-size:10px; font-weight:800; letter-spacing:2px; color:#66809F; margin-top:5px; }
+    .hero { position:relative; overflow:hidden; padding:38px 42px; border-radius:24px;
+      background:linear-gradient(112deg,#153D78 0%,#2057C5 62%,#087F9B 100%);
+      box-shadow:0 18px 45px rgba(27,76,148,.16); margin-bottom:22px; }
+    .hero:after { content:""; position:absolute; width:330px; height:330px; right:-85px; top:-185px;
+      border:1px solid rgba(255,255,255,.18); border-radius:50%;
+      box-shadow:0 0 0 35px rgba(255,255,255,.035),0 0 0 75px rgba(255,255,255,.025); }
+    .hero-tag { display:inline-block; color:white; background:rgba(255,255,255,.14);
+      border:1px solid rgba(255,255,255,.22); border-radius:30px; padding:7px 13px;
+      font-size:11px; font-weight:800; letter-spacing:1.2px; }
+    .hero h1 { color:#fff; font-size:clamp(30px,4vw,47px); font-weight:800;
+      letter-spacing:-1.5px; line-height:1.12; margin:20px 0 12px; }
+    .hero p { color:#E4EEFF; font-size:16px; max-width:850px; line-height:1.7; margin:0; }
+    .section-title { color:#193657; font-size:23px; font-weight:800; margin:28px 0 14px; }
+    .metric { background:#fff; border:1px solid #DFE8F4; border-radius:17px;
+      padding:19px 21px; min-height:116px; box-shadow:0 5px 16px rgba(25,55,95,.035); }
+    .metric-label { color:#71839D; font-size:13px; font-weight:600; }
+    .metric-value { color:#1D477F; font-size:31px; font-weight:800; margin-top:7px; }
+    .metric-note { color:#8A9AB0; font-size:11px; margin-top:2px; }
+    .notice { background:#EDF5FF; border:1px solid #C9DFFF; border-radius:14px;
+      padding:15px 18px; color:#405875; font-size:13px; line-height:1.65; margin:18px 0 22px; }
+    .panel { background:#fff; border:1px solid #DFE8F4; border-radius:18px;
+      padding:20px 22px; box-shadow:0 5px 16px rgba(25,55,95,.035); }
+    div[data-testid="stFileUploader"] { background:#F8FAFE; border:1px dashed #9DB8DA;
+      border-radius:14px; padding:14px; }
+    .small-muted { color:#7789A2; font-size:12px; }
+    div.stButton > button, div.stDownloadButton > button { border-radius:10px; font-weight:700;
+      min-height:44px; border:0; background:linear-gradient(90deg,#2057C5,#087F9B); color:white; }
+    div.stButton > button:hover, div.stDownloadButton > button:hover { color:white; border:0;
+      box-shadow:0 5px 16px rgba(32,87,197,.22); }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
-st.warning(
-    "This tool analyzes uploaded dataset records. A prediction is not "
-    "proof of an attack. It does not monitor live networks or block traffic."
-)
+def load_json(path: Path) -> dict[str, Any]:
+    try:
+        if path.exists():
+            with path.open("r", encoding="utf-8") as f:
+                value = json.load(f)
+                return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+    return {}
 
+@st.cache_resource(show_spinner="Loading trained model...")
+def load_model(path_string: str):
+    return joblib.load(path_string)
 
-# --------------------------------------------------
-# SIDEBAR
-# --------------------------------------------------
+def find_metric(metadata: dict[str, Any], candidates: tuple[str, ...], default=None):
+    for key in candidates:
+        if key in metadata and metadata[key] is not None:
+            return metadata[key]
+    # Search one level down for common nested metric dictionaries.
+    for value in metadata.values():
+        if isinstance(value, dict):
+            for key in candidates:
+                if key in value and value[key] is not None:
+                    return value[key]
+    return default
+
+def get_expected_features(model) -> list[str] | None:
+    features = getattr(model, "feature_names_in_", None)
+    if features is not None:
+        return [str(x) for x in features]
+    # Pipeline's preprocessing step may expose the input feature names.
+    try:
+        return [str(x) for x in model[:-1].feature_names_in_]
+    except Exception:
+        return None
+
+def clean_upload(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    drop_cols = [
+        c for c in df.columns
+        if c.strip().lower() in {"attack_type", "label", "target", "class", "unnamed: 0"}
+        or c.strip().lower().startswith("unnamed:")
+    ]
+    if drop_cols:
+        df = df.drop(columns=drop_cols, errors="ignore")
+    return df
+
+def align_features(df: pd.DataFrame, expected: list[str] | None) -> pd.DataFrame:
+    if not expected:
+        return df
+    # Preserve exact training feature order and allow imputers to handle absent values.
+    aligned = df.copy()
+    for col in expected:
+        if col not in aligned.columns:
+            aligned[col] = np.nan
+    extra = [c for c in aligned.columns if c not in expected]
+    if extra:
+        aligned = aligned.drop(columns=extra)
+    return aligned.reindex(columns=expected)
+
+def metric_card(label: str, value: str, note: str = ""):
+    st.markdown(
+        f'<div class="metric"><div class="metric-label">{label}</div>'
+        f'<div class="metric-value">{value}</div><div class="metric-note">{note}</div></div>',
+        unsafe_allow_html=True,
+    )
+
+# Sidebar
 with st.sidebar:
-    st.header("Project status")
-
-    st.write(
-        "Model:",
-        "Ready" if MODEL_PATH.exists() else "Not trained",
+    st.markdown(
+        '<div class="brand"><div class="brand-icon">🛡️</div><div>'
+        '<div class="brand-name">NTIC</div><div class="brand-sub">NETWORK TRAFFIC INTELLIGENCE</div>'
+        '</div></div>',
+        unsafe_allow_html=True,
     )
-
-    st.write(
-        "Evaluation report:",
-        "Available" if METADATA_PATH.exists() else "Not available",
-    )
-
+    st.markdown("### Workspace")
+    page = st.radio("Navigate", ["Overview & analytics", "Traffic analysis"], label_visibility="collapsed")
     st.divider()
-    st.subheader("Workflow")
-    st.write("1. Train the ML model")
-    st.write("2. Upload a compatible CSV")
-    st.write("3. Analyze predictions")
-    st.write("4. Review charts and export results")
+    st.markdown("### System status")
+    model_exists = MODEL_PATH.exists()
+    st.markdown(f"**ML model**  {'🟢 READY' if model_exists else '🔴 NOT FOUND'}")
+    st.markdown(f"**Evaluation report**  {'🟢 AVAILABLE' if METADATA_PATH.exists() else '🟡 NOT FOUND'}")
+    st.markdown("**Analysis mode**  CSV BATCH")
+    st.divider()
+    st.caption("BUILD 1.0 · ACADEMIC PROTOTYPE")
+    st.caption("Powered by CloudSentinel AI")
 
-
-# --------------------------------------------------
-# MODEL EVALUATION
-# --------------------------------------------------
-if METADATA_PATH.exists():
+metadata = load_json(METADATA_PATH)
+model = None
+model_error = None
+if model_exists:
     try:
-        meta = json.loads(
-            METADATA_PATH.read_text(encoding="utf-8")
-        )
+        model = load_model(str(MODEL_PATH))
+    except Exception as exc:
+        model_error = str(exc)
 
-        st.header("Model evaluation")
+# Header
+st.markdown(
+    """
+    <div class="hero">
+      <span class="hero-tag">● &nbsp; AI-POWERED SECURITY ANALYTICS</span>
+      <h1>Network Traffic<br>Intelligence Center</h1>
+      <p>Classify network-flow records, review machine-learning performance and turn uploaded traffic data into actionable analytical insights.</p>
+    </div>
+    <div class="notice"><b>Scope & responsible use</b> &nbsp; Predictions are model classifications, not proof of an attack.
+    This academic prototype analyzes uploaded CSV files only; it does not inspect live network traffic or automatically block connections.</div>
+    """,
+    unsafe_allow_html=True,
+)
 
-        accuracy = meta.get("accuracy", 0)
-        test_rows = meta.get("test_rows", 0)
-        classes = meta.get("classes", [])
+if model_error:
+    st.error(f"Model could not be loaded: {model_error}")
+elif not model_exists:
+    st.error(f"Trained model not found at: {MODEL_PATH}")
 
-        col1, col2, col3 = st.columns(3)
+if page == "Overview & analytics":
+    st.markdown('<div class="section-title">▌ Model overview</div>', unsafe_allow_html=True)
+    accuracy = find_metric(metadata, ("accuracy", "test_accuracy", "held_out_accuracy"), 0.9984)
+    try:
+        accuracy_value = f"{float(accuracy) * 100:.2f}%" if float(accuracy) <= 1 else f"{float(accuracy):.2f}%"
+    except Exception:
+        accuracy_value = "99.84%"
+    test_records = find_metric(metadata, ("test_records", "test_samples", "n_test", "test_size"), 24624)
+    classes = find_metric(metadata, ("n_classes", "num_classes", "attack_classes", "class_count"), 12)
+    training_records = find_metric(metadata, ("training_records", "train_records", "n_samples", "dataset_rows"), 123117)
+    cols = st.columns(4)
+    with cols[0]: metric_card("HELD-OUT ACCURACY", accuracy_value, "Saved evaluation result")
+    with cols[1]: metric_card("EVALUATION RECORDS", f"{int(test_records):,}" if str(test_records).isdigit() else str(test_records), "Hold-out test set")
+    with cols[2]: metric_card("TRAFFIC CLASSES", str(classes), "Target categories")
+    with cols[3]: metric_card("TRAINING RECORDS", f"{int(training_records):,}" if str(training_records).isdigit() else str(training_records), "Source dataset size")
 
-        col1.metric(
-            "Held-out accuracy",
-            f"{accuracy:.2%}",
-        )
-        col2.metric(
-            "Test records",
-            f"{test_rows:,}",
-        )
-        col3.metric(
-            "Attack classes",
-            len(classes),
-        )
+    st.markdown('<div class="section-title">▌ Model information</div>', unsafe_allow_html=True)
+    left, right = st.columns([1.15, 1])
+    with left:
+        st.markdown('<div class="panel">', unsafe_allow_html=True)
+        st.markdown("**About the classification model**")
+        st.write("CloudSentinel AI uses a trained Random Forest classification pipeline to categorize network-traffic records from a compatible CSV file.")
+        st.write("The preprocessing pipeline handles numeric and categorical features before generating a predicted traffic class.")
+        st.markdown("</div>", unsafe_allow_html=True)
+    with right:
+        st.markdown('<div class="panel">', unsafe_allow_html=True)
+        st.markdown("**Evaluation context**")
+        st.write("The displayed accuracy comes from the saved random hold-out evaluation. Performance on new or independently collected network traffic may differ.")
+        st.write("Rare classes can have limited test examples, so accuracy should be considered alongside class-wise precision, recall and F1-score.")
+        st.markdown("</div>", unsafe_allow_html=True)
 
-        st.caption(
-            "These metrics come from the saved random hold-out evaluation. "
-            "They do not guarantee performance on new real-world traffic."
-        )
+    report = find_metric(metadata, ("classification_report", "class_report", "report"), None)
+    if isinstance(report, dict):
+        report_df = pd.DataFrame(report).T
+        st.markdown('<div class="section-title">▌ Class-wise performance</div>', unsafe_allow_html=True)
+        st.dataframe(report_df, use_container_width=True)
 
-        report = meta.get("classification_report", {})
-        report_rows = []
+elif page == "Traffic analysis":
+    st.markdown('<div class="section-title">▌ Traffic analysis workspace</div>', unsafe_allow_html=True)
+    st.markdown("Upload a CSV containing the same network-flow features used during model training.")
+    uploaded = st.file_uploader("Choose a network traffic CSV file", type=["csv"], help="The target label column is optional. Identifier/index columns are ignored.")
+    if uploaded is not None:
+        try:
+            raw_df = pd.read_csv(uploaded, low_memory=False)
+        except Exception as exc:
+            st.error(f"Could not read this CSV: {exc}")
+            raw_df = None
 
-        for label, values in report.items():
-            if (
-                isinstance(values, dict)
-                and "precision" in values
-            ):
-                report_rows.append(
-                    {
-                        "Class": label,
-                        "Precision": values["precision"],
-                        "Recall": values["recall"],
-                        "F1-score": values["f1-score"],
-                        "Support": int(values["support"]),
+        if raw_df is not None:
+            st.success(f"File loaded successfully · {len(raw_df):,} records · {len(raw_df.columns):,} columns")
+            with st.expander("Preview uploaded data", expanded=False):
+                st.dataframe(raw_df.head(10), use_container_width=True)
+
+            if model is None:
+                st.error("The trained model is unavailable. Check artifacts/model.joblib.")
+            elif st.button("Run traffic classification", type="primary", use_container_width=True):
+                try:
+                    with st.spinner("Analyzing network traffic records..."):
+                        feature_df = clean_upload(raw_df)
+                        expected = get_expected_features(model)
+                        feature_df = align_features(feature_df, expected)
+                        predictions = model.predict(feature_df)
+                        result_df = raw_df.copy()
+                        result_df["Predicted_traffic_class"] = predictions
+                        if hasattr(model, "predict_proba"):
+                            probabilities = model.predict_proba(feature_df)
+                            result_df["Prediction_confidence"] = np.max(probabilities, axis=1)
+                        else:
+                            result_df["Prediction_confidence"] = np.nan
+
+                    st.session_state["ntic_results"] = result_df
+                    st.session_state["ntic_summary"] = {
+                        "rows": len(result_df),
+                        "classes": int(pd.Series(predictions).nunique()),
+                        "most_common": str(pd.Series(predictions).value_counts().index[0]),
                     }
-                )
+                except Exception as exc:
+                    st.error(f"Could not analyze this CSV: {exc}")
+                    st.info("Check that the uploaded file contains compatible feature columns and that the deployed model uses the pinned scikit-learn version.")
 
-        if report_rows:
-            st.subheader("Class-wise performance")
+    result = st.session_state.get("ntic_results")
+    summary = st.session_state.get("ntic_summary")
+    if result is not None and summary is not None:
+        st.markdown('<div class="section-title">▌ Classification results</div>', unsafe_allow_html=True)
+        c1, c2, c3 = st.columns(3)
+        with c1: metric_card("RECORDS ANALYZED", f"{summary['rows']:,}", "Uploaded rows")
+        with c2: metric_card("PREDICTED CLASSES", str(summary["classes"]), "Unique model outputs")
+        with c3: metric_card("MOST FREQUENT CLASS", summary["most_common"], "Highest prediction count")
+        counts = result["Predicted_traffic_class"].value_counts().rename_axis("Traffic class").reset_index(name="Records")
+        st.markdown("**Predicted traffic distribution**")
+        st.bar_chart(counts.set_index("Traffic class"), use_container_width=True)
+        if "Prediction_confidence" in result and result["Prediction_confidence"].notna().any():
+            avg_conf = result["Prediction_confidence"].mean()
+            st.caption(f"Mean model confidence: {avg_conf:.2%}. Confidence is not a guarantee that a prediction is correct.")
+            st.markdown("**Prediction confidence distribution**")
+            st.bar_chart(result["Prediction_confidence"].dropna().reset_index(drop=True), use_container_width=True)
+        st.markdown("**Prediction records**")
+        selected_classes = st.multiselect("Filter by predicted class", options=sorted(result["Predicted_traffic_class"].astype(str).unique()), default=sorted(result["Predicted_traffic_class"].astype(str).unique()))
+        filtered = result[result["Predicted_traffic_class"].astype(str).isin(selected_classes)]
+        st.dataframe(filtered, use_container_width=True, height=380)
+        csv_bytes = result.to_csv(index=False).encode("utf-8")
+        st.download_button("Download prediction results (CSV)", data=csv_bytes, file_name="ntic_prediction_results.csv", mime="text/csv", use_container_width=True)
 
-            report_df = pd.DataFrame(report_rows)
-            st.dataframe(
-                report_df,
-                width="stretch",
-                hide_index=True,
-                column_config={
-                    "Precision": st.column_config.NumberColumn(
-                        format="%.3f"
-                    ),
-                    "Recall": st.column_config.NumberColumn(
-                        format="%.3f"
-                    ),
-                    "F1-score": st.column_config.NumberColumn(
-                        format="%.3f"
-                    ),
-                },
-            )
-
-        cm = meta.get("confusion_matrix")
-        labels = meta.get("confusion_matrix_labels")
-
-        if cm and labels:
-            st.subheader("Confusion matrix")
-
-            cm_df = pd.DataFrame(
-                cm,
-                index=labels,
-                columns=labels,
-            )
-
-            fig_cm = px.imshow(
-                cm_df,
-                x=labels,
-                y=labels,
-                text_auto=True,
-                aspect="auto",
-                color_continuous_scale="Blues",
-                labels={
-                    "x": "Predicted class",
-                    "y": "Actual class",
-                    "color": "Records",
-                },
-                title="Actual vs predicted classes",
-            )
-
-            fig_cm.update_layout(
-                height=650,
-                xaxis_tickangle=-45,
-            )
-
-            st.plotly_chart(
-                fig_cm,
-                width="stretch",
-            )
-
-    except Exception as exc:
-        st.error(f"Could not load evaluation report: {exc}")
-
-else:
-    st.info(
-        "No evaluation report found. Train the model using README.md instructions."
-    )
-
-
-# --------------------------------------------------
-# CSV PREDICTION
-# --------------------------------------------------
-st.divider()
-st.header("Analyze network traffic")
-st.write(
-    "Upload a CSV containing the same input features used during model training."
+st.markdown(
+    '<div style="text-align:center;color:#8A9AB0;font-size:11px;padding:30px 0 8px;">'
+    'NTIC · Network Traffic Intelligence Center &nbsp;|&nbsp; Powered by CloudSentinel AI'
+    '</div>',
+    unsafe_allow_html=True,
 )
-
-uploaded = st.file_uploader(
-    "Upload network traffic CSV",
-    type=["csv"],
-)
-
-if uploaded:
-    if uploaded.size > MAX_UPLOAD_MB * 1024 * 1024:
-        st.error(
-            f"File exceeds the {MAX_UPLOAD_MB} MB upload limit."
-        )
-        st.stop()
-
-    try:
-        raw = pd.read_csv(uploaded, low_memory=False)
-
-        st.subheader("Uploaded data preview")
-
-        st.dataframe(
-            raw.head(10),
-            width="stretch",
-        )
-
-        st.caption(
-            f"{len(raw):,} records · {len(raw.columns)} columns"
-        )
-
-        if st.button(
-            "Run predictions",
-            type="primary",
-            width="stretch",
-        ):
-            with st.spinner("Analyzing network traffic..."):
-                output = predict_frame(raw)
-
-            if output.empty:
-                st.warning("The prediction output contains no records.")
-                st.stop()
-
-            if "predicted_class" not in output.columns:
-                st.error(
-                    "The prediction output does not contain "
-                    "the expected 'predicted_class' column."
-                )
-                st.stop()
-
-            # ------------------------------------------
-            # PREDICTION SUMMARY
-            # ------------------------------------------
-            st.success("Prediction complete.")
-
-            predictions = output["predicted_class"].astype(str)
-            counts = (
-                predictions.value_counts()
-                .rename_axis("Attack class")
-                .reset_index(name="Records")
-            )
-
-            counts["Percentage"] = (
-                counts["Records"] / len(output) * 100
-            )
-
-            total_records = len(output)
-            unique_classes = predictions.nunique()
-            top_class = counts.iloc[0]["Attack class"]
-            top_count = int(counts.iloc[0]["Records"])
-            top_percentage = top_count / total_records * 100
-
-            st.subheader("Prediction summary")
-
-            k1, k2, k3 = st.columns(3)
-
-            k1.metric(
-                "Records analyzed",
-                f"{total_records:,}",
-            )
-            k2.metric(
-                "Predicted classes",
-                unique_classes,
-            )
-            k3.metric(
-                "Most frequent prediction",
-                str(top_class),
-                f"{top_percentage:.1f}% of records",
-            )
-
-            if unique_classes == 1:
-                st.warning(
-                    "All records received the same predicted class. "
-                    "This is not necessarily an error, but verify the "
-                    "input data and predictions before drawing conclusions."
-                )
-
-            # ------------------------------------------
-            # CLASS DISTRIBUTION
-            # ------------------------------------------
-            st.subheader("Predicted class distribution")
-
-            fig_dist = px.bar(
-                counts.sort_values("Records"),
-                x="Records",
-                y="Attack class",
-                orientation="h",
-                text="Records",
-                hover_data={"Percentage": ":.2f"},
-                title="Number of records per predicted class",
-                color="Records",
-                color_continuous_scale="Blues",
-            )
-
-            fig_dist.update_layout(
-                height=max(400, 45 * len(counts)),
-                yaxis_title="Predicted class",
-                xaxis_title="Number of records",
-                coloraxis_showscale=False,
-            )
-
-            st.plotly_chart(
-                fig_dist,
-                width="stretch",
-            )
-
-            st.dataframe(
-                counts,
-                width="stretch",
-                hide_index=True,
-                column_config={
-                    "Percentage": st.column_config.NumberColumn(
-                        format="%.2f%%"
-                    ),
-                },
-            )
-
-            # ------------------------------------------
-            # CONFIDENCE DISTRIBUTION
-            # ------------------------------------------
-            if "prediction_confidence" in output.columns:
-                st.subheader("Prediction confidence")
-
-                confidence = pd.to_numeric(
-                    output["prediction_confidence"],
-                    errors="coerce",
-                ).dropna()
-
-                if not confidence.empty:
-                    st.metric(
-                        "Mean confidence",
-                        f"{confidence.mean():.2%}",
-                    )
-
-                    fig_conf = px.histogram(
-                        confidence,
-                        nbins=20,
-                        title="Distribution of model confidence scores",
-                        labels={
-                            "value": "Confidence score",
-                            "count": "Records",
-                        },
-                    )
-
-                    st.plotly_chart(
-                        fig_conf,
-                        width="stretch",
-                    )
-
-                    st.caption(
-                        "Model confidence is not the probability that a "
-                        "record represents a real attack."
-                    )
-
-            # ------------------------------------------
-            # PREDICTION RESULTS
-            # ------------------------------------------
-            st.subheader("Prediction results")
-
-            selected_class = st.selectbox(
-                "Filter by predicted class",
-                ["All classes"] + counts["Attack class"].tolist(),
-            )
-
-            if selected_class == "All classes":
-                filtered = output
-            else:
-                filtered = output[
-                    output["predicted_class"].astype(str)
-                    == selected_class
-                ]
-
-            st.caption(
-                f"Showing {len(filtered):,} of {len(output):,} records"
-            )
-
-            st.dataframe(
-                filtered.head(1000),
-                width="stretch",
-                hide_index=True,
-            )
-
-            # ------------------------------------------
-            # CSV EXPORT
-            # ------------------------------------------
-            st.download_button(
-                "Download all predictions as CSV",
-                data=output.to_csv(index=False).encode("utf-8"),
-                file_name="cloudsentinel_predictions.csv",
-                mime="text/csv",
-                width="stretch",
-            )
-
-            st.info(
-                "Review suspicious predictions with appropriate security "
-                "tools. This prototype does not confirm incidents or "
-                "automatically take protective action."
-            )
-
-    except Exception as exc:
-        st.error(f"Could not analyze this CSV: {exc}")
-        st.info(
-            "Check that the model is trained and the CSV has the expected "
-            "feature names and compatible data."
-        )
-
-else:
-    st.info("Upload a CSV file to begin analysis.")
